@@ -1,0 +1,56 @@
+# ============================================================
+# MATLAB Full-Adder Fault Classifier
+# ============================================================
+
+# MATLAB autosave and backup files
+*.asv
+*.m~
+*.autosave
+
+# Generated project output
+output/
+results/
+logs/
+
+# MATLAB code-generation folders
+codegen/
+slprj/
+sfun/
+*_grt_rtw/
+*_ert_rtw/
+*_rtw/
+
+# MATLAB generated and compiled/
+*_grt_rtw/
+*_ert_rtw files
+*.mex*
+*.slxc
+*.slx.r*
+*.mdl.r*
+
+# Temporary files and folders
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Testing, coverage, and generated reports
+coverage/
+test-results/
+html/
+report/
+
+# Editor configuration
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Crash dump and diagnostic files
+matlab_crash_dump.*
+java.log.*
+hs_err_pid*
+
