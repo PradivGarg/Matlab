@@ -1,0 +1,768 @@
+%%MACHINE-LEARNING POWER ESTIMATOR FOR DIGITAL CIRCUITS
+%
+%Project:
+%   ML_Digital_Power_estimator
+%
+%Objective:
+%   Estimate the approximate dynamic power consumption of a digital
+%   circuit using its operating and design parameters
+%
+%Simplified physical relationship:
+%   P_dynamic = alpha * C * V^2 * f
+%
+%Inputs:
+%   aplha   = switching activity
+%   C       = effective switched capacitance
+%   V       = supply voltage
+%   f       = operating frequency
+%
+% The project:
+%   1. Generates a synthetic digital-circuit dataset
+%   2. Saves the dataset as a CSV file
+%   3. Trains raw-feature ridge regression
+%   4. Trains physics-informed ridge regression
+%   5. Compares the models with the formula baseline
+%   6. Saves the best model as a MAT file
+%   7. Generates plots for design-space analysis
+%
+% This implementation does not require the Statistics and
+% Machine Learning Toolbox.
+
+clear;
+clc;
+close all;
+
+rng(42);
+
+%%----------------------------------------------------------
+% PROJECT CONFIGURATION
+%-----------------------------------------------------------
+
+projectRoot = fileparts(mfilename("fullpath"));
+
+if  strlength(projectRoot) == 0
+    projectRoot = pwd;
+end
+
+datasetPath = fullfile(...
+    projectRoot, ...
+    "digital_power_dataset.csv");
+
+resultPath = fullfile(...
+    projectRoot, ...
+    "power_model_results.csv");
+
+modelPath = fullfile(...
+    projectRoot, ...
+    "trained_power_estimator.mat");
+
+numberOfSamples = 6000;
+
+%Set this to true whenever you want to create a new dataset.
+regenerateDataset = false;
+
+fprintf("machine-Learning Digital Circuit Power Estimator\n");
+fprintf("================================================\n\n");
+
+%%-------------------------------------------------------------
+% LOAD OR GENERATE DATASET
+%--------------------------------------------------------------
+
+if regenerateDataset || ~isfile(datasetPath)
+    fprintf(...
+        "Generate %d circuit configurations...\n", ...
+        numberOfSamples);
+    dataset = generatePOwerDataset(numberOfSamples);
+    
+    writetable(dataset, datasetPath);
+
+    fprintf(...
+        "Dataset saved to: \n%s\n\n", ...
+        datasetPath);
+
+else
+    fprintf("Loading existing dataset...\n");
+
+    dataset = readtable(datasetPath);
+
+    fprintf(...
+        "Loaded %d circuit records from: \n%s\n\n", ...
+        height(dataset), ...
+        datasetPath);
+end
+
+%%-----------------------------------------------------
+% VALIDATE DATASET
+%------------------------------------------------------
+
+requiredVariables = {
+"SwitchingActivity"
+    "Capacitance_pF"
+    "Voltage_V"
+    "Frequency_MHz"
+    "GateCount"
+    "FanOut"
+    "Temperature_C"
+    "ProcessFactor"
+    "DynamicPower_mW"    
+};
+
+missingVariables = setdiff(...
+    requiredVariables, ...
+    dataset.Properties.VariableNames);
+
+if ~isempty(missingVariables)
+    error(...
+        "Dataset is missing these variables: %s", ...
+        strjoin(missingVariables, ", "));
+end
+
+disp("First ten circuit records: ");
+disp(dataset(1:min(10, height(dataset)), :));
+
+%%--------------------------------------------------------
+% DEFINE INPUT FEATURES AND TARGET
+%---------------------------------------------------------
+predictorNames = {
+    "SwitchingActivity"
+    "Capacitance_pF"
+    "Voltage_V"
+    "Frequency_MHz"
+    "GateCount"
+    "FanOut"
+    "Temperature_C"
+    "ProcessFactor"
+   };
+
+X = table2array(...
+    dataset(:, predictorNames));
+
+Y = dataset.DynamicPower_mW;
+
+%%---------------------------------------------------------
+% CREATE TRAINING AND TESTING DATA
+%----------------------------------------------------------
+
+%Deterministic 80/20 split.
+%
+%Every fifth row is assigned to the thest set.
+
+rowNumbers = (1:height(dataset))';
+
+testMask = mod(rowNumbers, 5) == 0;
+trainingMask = ~testMask;
+
+XTrain = X(trainingMask, :);
+YTrain = Y(trainingMask);
+
+XTest = X(testMask, :);
+YTest = Y(testMask);
+
+fprintf(...
+    "Training samples: %d\n", ...
+    size(XTrain,1));
+
+frpintf(...
+    "Testing samples: %d\n\n", ...
+    size(XTest, 1));
+
+%%---------------------------------------------------
+% MODEL 1: PHYSICS FORMULA BASELINE
+%----------------------------------------------------
+
+physicsPredictions = ...
+    XTest(:, 1) .*...
+    XTest(:, 2) .*...
+    XTest(:, 3) .*...
+    XTest(:, 4) .*...
+    1e-3;
+
+physicsMetrics = calculateRegressionMetrics(...
+    YTest, ...
+    physicsPredictions);
+
+%%---------------------------------------------------
+% MODEL 2: RAW-FEATURE RIDGE REGRESSION
+%----------------------------------------------------
+
+rawFeatureMode = "raw";
+rawLambda = 0.10;
+
+[rawTrainingFeatures, rawFeatureNames] = ...
+    buildFeatureMatrix(...
+    XTrain, ...
+    rawFeatureMode);
+
+rawTestingFeatures = buildFeatureMatrix(...
+    XTest, ...
+    rawFeatureMode);
+
+rawModel = fitRidgeModel( ...
+    rawTrainingFeatures, ...
+    YTrain, ...
+    rawLambda, ...
+    rawFeatureNames);
+
+rawPredictions = predictRidgeModel(...
+    rawModel, ...
+    rawTestingFeatures);
+
+rawMetrics = calculateRegressionMetrics(...
+    YTest, ...
+    rawPredictions);
+
+%%------------------------------------------------------
+% MODEL 3: PHYSICS-INFORMED RIDGE REGRESSION
+%-------------------------------------------------------
+
+physicsFeatureMode = "physics_informed";
+physicsLambda = 0.01;
+
+[physicsTrainingFeatures, physicsFeatureNames] = ...
+    buildFeatureMatrix(...
+    Xtrain, ...
+    physicsFeatureMode);
+
+physicsTestingFeatures = buildFeatureMatrix(...
+    XTest, ...
+    physicsFeatureMode);
+
+physicsInformedModel = fitRidgeModel(...
+    physicsTrainingFeatures, ...
+    YTrain, ...
+    physicsFeatureMode, ...
+    physicsFeatureNames);
+
+physicsInformedPredictions = predictRidgeModel(...
+    physicsInformedModel, ...
+    physicsTestingFeatures);
+
+physicsInformedMetrics = ...
+    calculateRegressionMetrics(...
+    YTest, ...
+    physicsInformedPredictions);
+
+%%------------------------------------------------
+% COMPARE MODEL PERFORMANCE
+%-------------------------------------------------
+
+modelNames = [
+    "Physics Formula Baseline",
+    "Raw-Feature Ridge Regression",
+    "Physics-Informed Ridge Regression"];
+
+RSME_mW = [
+    physicsMetrics.RMSE,
+    rawMetrics.RMSE,
+    physicsInformedMetrics.RMSE];
+
+MAE_mW = [
+    physicsMetrics.MAE,
+    rawMetrics.MAE,
+    physicsInformedMetrics.MAE];
+
+R2 = [
+    physicsMetrics.R2,
+    rawMetrics.R2,
+    physicsInformedMetrics.R2];
+
+MAPE_Percent = [
+    physicsMetrics.MAPE,
+    rawMetrics.MAPE,
+    physicsInformedMetrics.MAPE];
+
+resultsTable = table(...
+    modelNames, ...
+    RMSE_mW, ...
+    R2, ...
+    MAPE_Percent, ...
+    "VariableNames",{ ...
+    "Model", ...
+    "RMSE_mW", ...
+    "MAE_mW", ...
+    "R2", ...
+    "MAPE_Percent"});
+
+resultsTable = sortrows(...
+    resultsTable, ...
+    "RMSE_mW");
+
+writeTable(...
+    resultsTable, ...
+    resultsPath);
+
+disp("Model-performance comparison:");
+disp(resultTable);
+
+fprintf(...
+    "Model results saved to:\n%s\n\n\", resultsPath);
+
+%%-----------------------------------------------------
+% SELECT BEST MACHINE-LEARNING MODEL
+%------------------------------------------------------
+
+trainedModels = {
+    rawModel,
+    physicsInformedModel};
+
+trainedMetrics = {
+    rawMetrics,
+    physicsInformedmetrics};
+
+trainedPredictions = {
+    rawPredictions,
+    physicsInformedPredictions};
+
+trainedModelNames = [
+    "Raw-Feature Ridge Regression",
+    "Physics-Informed Ridge Regression"];
+
+trainedRMSE = [
+    rawMetrics.RMSE,
+    physicsInformedMetrics.RMSE];
+
+[~, bestModelIndex] = min(trainedRMSE);
+
+bestModel = trainedModels{bestModelIndex};
+bestMetrics = trainedMetrics{bestModelIndex};
+bestPredictions = trainedPredictions{bestModelIndex};
+bestModelName = trainedModelNames(bestModelIndex);
+
+%%----------------------------------------------------
+% SAVE TRAINED MODEL
+%-----------------------------------------------------
+
+modelPackage = struct();
+
+modelPackage.ModelName = bestModelName;
+modelPackage.FeatureMode = bestModel.FeatureMode;
+modelPackage.PredcitorNames = predictorNames;
+modelPackage.FeatureNames = bestModel.FeatureNames;
+
+modelPackage.Mu = bestModel.Mu;
+modelPackage.Sigma = bestModel.Sigma;
+modelPackage.Beta = bestModel.Beta;
+modelPackage.Lambda = bestModel.Lambda;
+
+modelPackage.RMSE_mW = bestMetrics.RMSE;
+modelPacakge.MAE_mW = bestMetrics.MAE;
+modelPackage.R2 = bestMetrics.R2;
+modelPackage.MAPE_Percent = bestMetrics.MAPE;
+
+modelPackage.TrainingSmaples = size(XTrain, 1);
+modelPackage.TestSamples = size(XTest, 1);
+modelPackage.createdOn = datetime("now");
+
+modelPackage.Description = ...
+    "Physics-informed digital dynamic-power estimator.";
+
+save(...
+    modelPath, ...
+    "modelPackage");
+
+fprintf("Best trained model\n");
+fprintf("------------------------------");
+
+fprintf(...
+    "Model      : %s\n", ...
+    modelPackage.ModelName);
+
+fprintf(...
+    "RMSE       : %.6f mmW\n", ...
+    modelPackage.RMSE_mW);
+
+fprintf(...
+    "MAE        : %.6f mW\n", ...
+    modelPackage.MAE_mW);
+
+fprintf(...
+    "R-squared  : %.6f mW\n", ...
+    modelPackage.R2);
+
+fprintf(...
+    "MAPE       : %.4f %%\n", ...
+    modelPackage.MAPE_Precent);
+
+fprintf(...
+    "Model saved: %s\n\n", ...
+    maodelPath);
+
+%%--------------------------------------------
+% ESTIMATE POWER FOR A NEW CIRCUIT
+%---------------------------------------------
+
+newCircuit = table(...
+    0.18, ...       %Switching activity
+    250, ...        %Capaticatnce in pF
+    0.90, ...       %Voltage in V
+    500, ...        %Frequency in MHz
+    125000, ...     %Gate count
+    2.5, ...        %Fan-out
+    65, ...         %Temperature in Celsius
+    1.02, ...       %Process factor
+    "VariableNames", predictorNames);
+
+newCircuitArray = table2array(newCircuit);
+
+newCircuitFeatures = buildFeatureMatrix(...
+    newCircuitArray, ...
+    modelPackage.FeatureMode);
+
+estimatedPower_mW = predictRidgeModel( ...
+    modelPackage, ...
+    newCircuitFeatures);
+
+formulaPower_mW = ...
+    newCircuit.SwitchingActivity .* ...
+    newCircuit.Capacitance_pF .* ...
+    newCircuit.Voltage_V^2 .* ...
+    newCircuit.Frequency_MHz .* ...
+    1e-3;
+
+fprintf( ...
+    "ML-estimated power     : %.6f mW\n", ...
+    estimatedPower_mW);
+
+fprintf(...
+    "Formula baseline power : %.6f mW\n", ...
+    formulaPower_mW);
+
+fprintf(...
+    "Estimated adjustment   : %.6f mW\n\n", ...
+    estimatedPower_mW - formulaPower_mW);
+
+%%----------------------------------------------------
+% VISUALIZATION 1: ACTUAL VS PREDICTED
+%-----------------------------------------------------
+
+figure("Name", "Actual versus Predicted Power");
+scatter(YTest, bestpredictions, 20, "filled");
+hold on;
+
+minimumPower = min([YTest; bestPredictions]);
+maximumPower = max([YTest,; bestPreditions]);
+
+plot(...
+    [minimumPower, maximumPower], ...
+    [minimumPower, maximumPower], ...
+    "LineWidth", ...
+    1.5);
+
+hold off;
+
+xlabel("Actual Dynamic Power (mW)");
+ylabel("predicted Dynamic Power (mW)");
+
+title("Actual versus Predicted Dynamic Power");
+
+grid on;
+
+%%-----------------------------------------------------
+% VISUALIZATION 2: RESIDUAL POWER
+%%-----------------------------------------------------
+
+residuals = YTest - bestPractices;
+
+figure("Name", "Power prediction Residuals");
+histogram(residuals, 40);
+
+xlabel("Prediction error (mW)");
+ylabel("Number of Test Samples");
+
+title("Distribution of Power-Predictions Errors");
+
+grid on;
+
+%%-----------------------------------------------------
+% VISUALIZATION 3: MODEL COMPARISION
+%%-----------------------------------------------------
+
+figure("Name", "Model RMSE Comparision");
+bar(categorical(modelNames), RMSE_mW);
+
+ylabel("RMSE (mW)");
+
+title("Digital-Power Estimator Comparision");
+
+grid on;
+
+%%-----------------------------------------------------
+% VISUALIZATION 4: FEATURE IMPORTANCE
+%%-----------------------------------------------------
+
+featureImportance = abs(modelPackage.Beta(2:end));
+featureImportance = featureImportance ./ maxc(sum(featureImportance), eps);
+figure("Name", "Feature Importance");
+bar(cagtegorical(modelPackage.FeatureNames), featureImportance);
+
+ylabel("Relative Absolute Coefficient");
+
+title("Physics-Informed Feature Importance");
+
+xtickangles(45);
+grid on;
+
+%%-----------------------------------------------------
+% VISUALIZATION 5: VOLTAGE DESIGN SPACE
+%%-----------------------------------------------------
+
+voltageRange = linespace(0.60,  1.20, 100);
+voltageExperiment = repmat(newCircuitArray, 100, 1);
+voltageExperiment(:, 3) = voltageRange;;
+
+voltageFeatures = buildFeatureMatrix(voltageExperiment, ...
+    modelPackage.FeatureMode);
+
+voltagePredictions = predictRidgeModel(modelPackage, voltageFeatures);
+
+figure("Namr", "Voltage versus Power");
+plot(voltageRange, voltagePredictions, "LineWidth", 1.5);
+
+xlabel("Supply Voltage (V)");
+ylabel("Predicted Dynamic Power (mW)");
+
+title("Effect of Supply Voltage on Dynamic Power");
+
+grid on;
+
+%%---------------------------------------------------------
+% VISUALIZATION 6: FREQUENCY DESGIN SPACE
+%%---------------------------------------------------------
+
+frequencyRange = lineSpace(50, 1000, 100)';
+
+frequencyExperiment = repmat(newCircuitArray, 100, 1);
+
+frequencyExperiment(:, 4) = frequencyRange;
+
+frequencyFeatures = buildFeautureMatrix(frequencyExperiment, ...
+    maodelPackage.FeatureMode);
+
+frequencyPredictions = predictRidgeModel(modelPackage, ...
+    featureFeatures);
+
+figure("Name", "Frquency verus Power");
+plot(frequencyRange, frequencyPredictions, "LineWidth", 1.5);
+
+xlabel("Operating Frequency (Mhz)");
+ylabel("PRedicted Dynamic Power (mW)");
+
+title("Effect of Frequency on Dynamic Power");
+
+grid on;
+
+fprintf("Project execution completed successfully.\n");
+
+%%------------------------------------------------------------
+% LOCAL FUNCTION : GENERATE SYNTHETIC DATASET
+%%------------------------------------------------------------
+
+function dataset = generatePowerDataset(numberOfSamples)
+    arguments
+
+        numberOfSamples (1,1) double {mustBeInteger, mustBePositive}
+    end
+
+    % Switching activity between 1% and 50%
+    switchingActivity = 0.01 + (0.50 - 0.01) .* rand(numberOfSamples, 1);
+
+    % Gate count for small and medium digital blocks.
+    gateCount = randi([1000, 50000], numberOfSamples, 1);
+
+    % Effective capacitance is partially related to gate count.
+    capacitiveVariance = 0.75 + (1.25 - 0.75) .* rand(numnberOfSamples, 1);
+    capacitance_pF = 0.002 .* gateCount .* capacitiveVariance;
+
+    % Supply voltage.
+    voltage_V = 0.60 + (1.20 - 0.60) .* rand(numberOfSamples, 1);
+
+    % Operating frequency
+    frequency_MHz = 50 + (1000 - 50) .* rand(numberOfSamples, 1);
+
+    % Average circuit fan-out
+    fanOut = 1 + (5 - 1) .* rand(numberOfSamples, 1);
+
+    % Operating temperatures.
+    temperature_C = 25 + (100 - 25 ) .* rand(numberOfSamples, 1);
+
+    % Simplefied semiconductor process variables.
+    processFactor = 0.90 + (1.10 - 0.90) .* rand(numberOfSamples, 1);
+
+    % Base dynamic power in milliwatts.
+    basePower_mW = switchingActivity .* capacitance_pF .* ...
+        voltage_V .^2 .* frequency_MHz .* 1e-3;
+
+    % Fan-out correction.
+    fanOutFactor = 1 + 0.04 .* (fanOut - 1);
+
+    % Temperature correction.
+    temperatureFactor = 1 + 0.0015 .* (temperature_C - 25);
+
+    % Combine all effects.
+    correctedPower_mW = basePower_mW .* fanOutFactor .* ...
+        temperatureFactor .* processFactor;
+
+    % Add approximately 3% observation noise.
+    noiseStandardDeviation = 0.03 .* max(correctedPower_mW, eps);
+    randomNoise = noiseStandardDeviation .* ...
+        randn(numberOfSamples, 1);
+
+    dynamicPower_mW = max(correctedPower_mW + randomNoise, 0);
+
+    dataset =  table( ...
+        switchingActivity, ...
+        capacitance_pF, ...
+        voltage_V, ...
+        frequency_MHz, ...
+        gateCount, ...
+        fanOut, ...
+        temperature_C, ...
+        processFactor, ...
+        dynamicPower_mW, ...
+        "VariableNames", {
+            "SwitchingActivity"
+            "Capacitance_pF"
+            "Voltage_V"
+            "Frequency_MHz"
+            "GateCount"
+            "FanOut"
+            "Temperature_C"
+            "ProcessFactor"
+            "DynamicPower_mW"
+        });
+
+end
+
+%%---------------------------------------------------------
+% LOCAL FUNCTION : BUILD FEATURE MATRIX
+%%---------------------------------------------------------
+
+function [features, featureNames] = buildFeatureMatirx(circuitInputs, ...
+    featureMode);
+    
+    rawFeaturesNames = {
+        "SwitchingActivity"
+        "Capacitance_pF"
+        "Voltage_V"
+        "Frequency_MHz"
+        "GateCount"
+        "FanOut"
+        "Temperature_C"
+        "ProcessFactor"
+    };
+
+    if featureMode == "raw"
+        features = circuitInputs;
+        featureNames = rawFeatureNames;
+
+        return;
+    end
+
+    alpha = circuitInputs(:, 1);
+    capacitance = circuitInputs(:, 2);
+    voltage = circuitInputs(:, 3);
+    frequency = circuitInputs(:, 4);
+
+    fanOut = circuitInputs(:, 6);
+    temperature = circuitInputs(:, 7);
+    processFactor = circuitInputs(:, 8);
+
+    basePower_mW = alpha .* capacitance .* voltage.^2 .* ...
+        frequency .* 1e-3;
+
+    features = [
+        circuitInputs
+        basePower_mW
+        basePower_mW .* fanOut
+        basePower_mW .* temperature
+        basePower_mW .* processFactor
+        basePower_mW .* fanOut .* processFactor
+        basePower_mW .* temperature .* processFactor
+        basePower_mW .* fanOut .* temperature .* processFactor
+    ];
+
+
+    featureNames = [
+        rawFeatureNames
+        {
+            "BasePower_mW"
+            "BasePower_x_FanOut"
+            "BasePower_x_Temperature"
+            "BasePower_x_Process"
+            "BasePower_x_FanOut_x_Process"
+            "BasePower_x_Temperature_x_Process"
+            "BasePower_x_FanOut_x_Temperature_x_Process"
+        }
+    ];
+
+end
+
+%%----------------------------------------------------------
+% LOCAL FUNCTION : TRAIN RIDGE REGRESSION
+%%----------------------------------------------------------
+
+function model = fitRidgeModel(trainingFeatures, trainingFeatures, ...
+    lambda, featureMode, featurenames);
+    
+    % Calculate features scaling parameters.
+    featureMean = mean(trainingFeatures, 1);
+    featureStandardDeviation = std(trainingFeatures, 0, 1);
+
+    % Prevent division by Zero
+    featureStandardDeviation(featureStandarDeviation == 0) = 1;
+
+    standardizedFeatures = (trainingFeatures - featureMean) ./ ...
+        featureStandardDeviation;
+
+    % Add intercept column.
+    designMatrix = [
+        ones(size(standardizedFeatures, 1), 1), ...
+        standardizedFeatures];
+
+    % Do not regularize the intercept coefficient
+    regularizationMatrix = ddiag(...
+        [0 ...
+        ones(size(standardaizedFeatures,2), 1) ...
+        ]);
+
+    coefficients = (...
+        designMatrix' * designMatrix + lambda .* regularizationMatrix) \ ...
+        (designMatix' * trainingTarget);
+
+    model = struct();
+
+    model.FeatureMode = featureMode;
+    model.FeatureName = featureNames;
+
+    model.Mu = featureMean;
+    model.Sigma = featureStandardDeviation;
+    model.Beta = coefficients;
+    model.lambda = lambda;
+
+end
+
+%%--------------------------------------------------------
+% LOCAL FUNCTION : PREDICT USING RIDGE MODEL    
+%%--------------------------------------------------------
+
+function predictions  = predictRidgeModel(model, features)
+    standardizedFeatures = (features - model.Mu) ./ model.Sigma;
+
+    designMatrix = [
+        ones(size(standardizedFeatures, 1), 1)
+        standardizedFeatures];
+
+    predictions = designMatrix * model.Beta;
+
+    % Power cannot be negative
+    predictions = max(predictions, 0);
+
+end
+
+%%------------------------------------------------------------
+%  LOCAL FUNCTION : CALCULATE REGRESSION METRICS
+%%------------------------------------------------------------
+
+function metrics = calculateegressionMetrics(atucalValues, predictedValues);
+
+    actualValues = actual
